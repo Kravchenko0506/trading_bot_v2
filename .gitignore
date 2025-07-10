@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Trading Bot Secrets
+.env
+.env.local
+.env.production
+config/secrets.json
+data/api_keys/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+data/trading_bot.db
+
+# Logs
+logs/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Trading Data
+data/backtest/
+data/live_trades/
+data/market_data/
+
+# Binance API
+binance_api_*.json
+*.key
+
+# Performance profiling
+*.prof
+
+# Coverage reports
+htmlcov/
+.coverage
+.coverage.*
