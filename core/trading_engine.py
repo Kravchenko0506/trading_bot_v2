@@ -1,114 +1,211 @@
-# core/trading_engine.py
 """
-Trading engine with dependency injection and event-driven architecture.
-Decoupled from specific implementations.
+Trading Engine - clean orchestration layer.
+CRITICAL: only coordinates services, no business logic, proper error handling.
 """
-import asyncio
 from decimal import Decimal
-from typing import Optional, Dict, Any
-
-from core.interfaces import IOrderExecutor, IRiskManager, IMarketData
-from core.event_bus import event_bus
+from typing import Optional
+from .interfaces.trading_interfaces import (
+    IMarketDataService, IRiskService, IOrderService,
+    INotificationService, IPortfolioService, OrderSide, OrderStatus
+)
+from .exceptions.trading_exceptions import TradingError, RiskValidationError, OrderExecutionError
 from utils.logger import get_trading_logger
 
 logger = get_trading_logger()
 
 
 class TradingEngine:
+    """Clean orchestration layer - only coordinates services"""
+
     def __init__(self,
-                 order_executor: IOrderExecutor,
-                 risk_manager: IRiskManager,
-                 market_data: Optional[IMarketData] = None):
-        self.order_executor = order_executor
-        self.risk_manager = risk_manager
+                 market_data: IMarketDataService,
+                 risk_service: IRiskService,
+                 order_service: IOrderService,
+                 notification_service: INotificationService,
+                 portfolio_service: IPortfolioService):
+
+        # Dependency injection - all services injected via constructor
         self.market_data = market_data
+        self.risk_service = risk_service
+        self.order_service = order_service
+        self.notifications = notification_service
+        self.portfolio = portfolio_service
 
-        # Subscribe to events
-        event_bus.subscribe("order_request", self._handle_order_request)
-        event_bus.subscribe("price_update", self._handle_price_update)
+        logger.info("TradingEngine initialized with dependency injection")
 
-    async def execute_trade(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> bool:
-        """Execute trade with risk validation"""
+    async def execute_buy_signal(self, symbol: str, quantity: Decimal, price: Decimal) -> bool:
+        """Execute buy order with full validation pipeline"""
         try:
-            # Risk validation
-            if not await self.risk_manager.validate_trade(symbol, quantity, price):
-                await event_bus.publish("trade_rejected", {
-                    "symbol": symbol, "reason": "risk_validation_failed"
-                })
+            logger.info(
+                f"Processing buy signal: {symbol} qty={quantity} price={price}")
+
+            # 1. Risk validation
+            risk_check = await self.risk_service.validate_buy_order(symbol, quantity, price)
+            if not risk_check.approved:
+                logger.warning(
+                    f"Buy order rejected by risk management: {risk_check.reason}")
+                await self.notifications.send_error_alert(
+                    f"Buy order rejected: {risk_check.reason}",
+                    "RISK_REJECTION"
+                )
                 return False
 
-            # Execute order
-            order_id = await self.order_executor.execute_order(symbol, side, quantity, price)
+            # 2. Execute order
+            result = await self.order_service.execute_buy_order(symbol, quantity, price)
+            if result.status != OrderStatus.SUCCESS:
+                logger.error(f"Buy order execution failed: {result.message}")
+                await self.notifications.send_error_alert(
+                    f"Buy order failed: {result.message}",
+                    "ORDER_EXECUTION_ERROR"
+                )
+                return False
 
-            # Publish success event
-            await event_bus.publish("trade_executed", {
-                "symbol": symbol, "side": side, "quantity": quantity,
-                "price": price, "order_id": order_id
-            })
+            # 3. Send success notification
+            await self.notifications.send_trade_alert(symbol, OrderSide.BUY, result.executed_price)
 
+            logger.info(
+                f"Buy order completed successfully: {symbol} @ {result.executed_price}")
+            return True
+
+        except RiskValidationError as e:
+            logger.error(f"Risk validation error in buy signal: {e}")
+            await self.notifications.send_error_alert(str(e), "RISK_ERROR")
+            return False
+        except OrderExecutionError as e:
+            logger.error(f"Order execution error in buy signal: {e}")
+            await self.notifications.send_error_alert(str(e), "EXECUTION_ERROR")
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error in buy signal: {e}", exc_info=True)
+            await self.notifications.send_error_alert(str(e), "UNEXPECTED_ERROR")
+            return False
+
+    async def execute_sell_signal(self, symbol: str, current_price: Optional[Decimal] = None) -> bool:
+        """Execute sell order with full validation pipeline"""
+        try:
+            # Get current price if not provided
+            if current_price is None:
+                current_price = await self.market_data.get_current_price(symbol)
+
+            logger.info(
+                f"Processing sell signal: {symbol} price={current_price}")
+
+            # 1. Check if we have position to sell
+            position = await self.portfolio.get_position(symbol)
+            if not position or position.quantity <= 0:
+                logger.warning(f"No position found to sell for {symbol}")
+                return False
+
+            # 2. Risk validation
+            risk_check = await self.risk_service.validate_sell_order(symbol, current_price)
+            if not risk_check.approved:
+                logger.warning(
+                    f"Sell order rejected by risk management: {risk_check.reason}")
+                await self.notifications.send_error_alert(
+                    f"Sell order rejected: {risk_check.reason}",
+                    "RISK_REJECTION"
+                )
+                return False
+
+            # 3. Execute sell order
+            result = await self.order_service.execute_sell_order(symbol, position.quantity, current_price)
+            if result.status != OrderStatus.SUCCESS:
+                logger.error(f"Sell order execution failed: {result.message}")
+                await self.notifications.send_error_alert(
+                    f"Sell order failed: {result.message}",
+                    "ORDER_EXECUTION_ERROR"
+                )
+                return False
+
+            # 4. Calculate profit/loss
+            profit = None
+            if position.avg_price > 0:
+                profit = (result.executed_price - position.avg_price) * \
+                    result.executed_quantity
+
+                # Update daily loss tracking if it's a loss
+                if profit < 0:
+                    self.risk_service.update_daily_loss(abs(profit))
+
+            # 5. Send success notification
+            await self.notifications.send_trade_alert(symbol, OrderSide.SELL, result.executed_price, profit)
+
+            logger.info(
+                f"Sell order completed successfully: {symbol} @ {result.executed_price} (P&L: {profit})")
             return True
 
         except Exception as e:
-            await event_bus.publish("trade_failed", {
-                "symbol": symbol, "error": str(e)
-            })
+            logger.error(
+                f"Unexpected error in sell signal: {e}", exc_info=True)
+            await self.notifications.send_error_alert(str(e), "SELL_ERROR")
             return False
 
-    async def _handle_order_request(self, data: Dict[str, Any]):
-        """Handle incoming order requests via events"""
-        await self.execute_trade(
-            data["symbol"], data["side"],
-            data["quantity"], data["price"]
-        )
+    async def get_portfolio_status(self) -> dict:
+        """Get comprehensive portfolio status"""
+        try:
+            balance = await self.portfolio.get_account_balance()
+            positions = await self.portfolio.get_all_positions()
+            total_value = await self.portfolio.get_total_portfolio_value()
 
-    async def _handle_price_update(self, data: Dict[str, Any]):
-        """Handle price updates"""
-        logger.debug(f"Price update: {data}")
+            return {
+                "balance_usdt": balance,
+                "total_positions": len(positions),
+                "total_portfolio_value": total_value,
+                "positions": {symbol: {
+                    "quantity": pos.quantity,
+                    "avg_price": pos.avg_price,
+                    "unrealized_pnl": pos.unrealized_pnl
+                } for symbol, pos in positions.items()}
+            }
 
+        except Exception as e:
+            logger.error(f"Failed to get portfolio status: {e}")
+            return {}
 
-# Concrete implementations
-class OrderExecutor(IOrderExecutor):
-    """Concrete order executor using position manager"""
+    async def check_market_conditions(self, symbol: str) -> dict:
+        """Check current market conditions for symbol"""
+        try:
+            current_price = await self.market_data.get_current_price(symbol)
+            # Last 24 hours
+            klines = await self.market_data.get_klines(symbol, "1h", 24)
 
-    def __init__(self, position_manager):
-        self.position_manager = position_manager
+            return {
+                "symbol": symbol,
+                "current_price": current_price,
+                "24h_high": max(kline['high'] for kline in klines),
+                "24h_low": min(kline['low'] for kline in klines),
+                "24h_volume": sum(kline['volume'] for kline in klines),
+                "price_change_24h": current_price - klines[0]['open'] if klines else Decimal('0')
+            }
 
-    async def execute_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> str:
-        from core.position_manager import place_order
-        return await place_order(symbol, side, quantity, price)
+        except Exception as e:
+            logger.error(
+                f"Failed to check market conditions for {symbol}: {e}")
+            return {}
 
+    async def send_daily_summary(self) -> bool:
+        """Send daily trading summary"""
+        try:
+            # This would typically pull data from a database of completed trades
+            # For now, we'll use placeholder values
+            total_trades = 0
+            total_profit = Decimal('0.0')
+            win_rate = Decimal('0.0')
 
-class RiskManager(IRiskManager):
-    """Simple risk manager implementation"""
+            return await self.notifications.send_daily_summary(total_trades, total_profit, win_rate)
 
-    def __init__(self, max_position_size: Decimal = Decimal('1000')):
-        self.max_position_size = max_position_size
-
-    async def validate_trade(self, symbol: str, quantity: Decimal, price: Decimal) -> bool:
-        trade_value = quantity * price
-
-        if trade_value > self.max_position_size:
-            logger.warning(
-                f"Trade value {trade_value} exceeds max position size")
+        except Exception as e:
+            logger.error(f"Failed to send daily summary: {e}")
             return False
 
-        return True
+    async def start(self):
+        """Start trading engine (placeholder for main trading loop)"""
+        logger.info("Trading engine started")
+        # This would contain the main trading loop
+        # For now, just log that the engine is ready
 
-
-class MarketData(IMarketData):
-    """Market data provider"""
-
-    async def get_price(self, symbol: str) -> Decimal:
-        return Decimal('50000.0')
-
-
-# Factory function
-def create_trading_engine() -> TradingEngine:
-    """Create trading engine with injected dependencies"""
-    from core.position_manager import position_manager
-
-    order_executor = OrderExecutor(position_manager)
-    risk_manager = RiskManager()
-    market_data = MarketData()
-
-    return TradingEngine(order_executor, risk_manager, market_data)
+    async def stop(self):
+        """Stop trading engine gracefully"""
+        logger.info("Trading engine stopping...")
+        # Cleanup operations would go here
+        logger.info("Trading engine stopped")

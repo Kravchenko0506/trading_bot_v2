@@ -20,7 +20,8 @@ class BinanceConfig:
     api_key: str
     api_secret: str
     testnet: bool = False
-    
+    rate_limit_per_minute: int = 1200  # ДОБАВЛЯЕМ ЭТО
+
     def __post_init__(self):
         if not self.api_key or not self.api_secret:
             raise ValueError("Binance API credentials are required")
@@ -33,7 +34,7 @@ class DatabaseConfig:
     pool_size: int = 10
     max_overflow: int = 20
     echo: bool = False
-    
+
     def __post_init__(self):
         if self.url is None:
             # Default to SQLite
@@ -47,7 +48,7 @@ class TelegramConfig:
     token: str
     admin_ids: list[str]
     webhook_url: Optional[str] = None
-    
+
     def __post_init__(self):
         if not self.token:
             raise ValueError("Telegram bot token is required")
@@ -61,20 +62,24 @@ class TradingConfig:
     max_position_size: Decimal = Decimal('100')
     price_precision: int = 8
     quantity_precision: int = 8
-    
+
     # Risk management defaults
     default_stop_loss: Decimal = Decimal('-0.02')  # -2%
     default_take_profit: Decimal = Decimal('0.05')  # 5%
     default_min_profit: Decimal = Decimal('0.01')   # 1%
-    
+
     # Commission
     commission_rate: Decimal = Decimal('0.001')  # 0.1%
-    
+
     # Safety settings
     allow_concurrent_positions: bool = False
     max_daily_trades: int = 50
     cooldown_between_trades: int = 60  # seconds
-    
+
+    # ДОБАВЛЯЕМ ЭТИ ПОЛЯ ДЛЯ FACTORY:
+    max_daily_loss: Decimal = Decimal('500')  # Max loss per day
+    max_trade_size: Decimal = Decimal('100')  # Max size per trade
+
     def __post_init__(self):
         # Validate ranges
         if self.default_stop_loss >= 0:
@@ -83,6 +88,11 @@ class TradingConfig:
             raise ValueError("Take profit must be positive")
         if self.min_trade_amount <= 0:
             raise ValueError("Minimum trade amount must be positive")
+        # Добавляем валидацию новых полей
+        if self.max_daily_loss <= 0:
+            raise ValueError("Max daily loss must be positive")
+        if self.max_trade_size <= 0:
+            raise ValueError("Max trade size must be positive")
 
 
 @dataclass
@@ -93,58 +103,58 @@ class LoggingConfig:
     max_file_size: int = 10 * 1024 * 1024  # 10MB
     backup_count: int = 5
     console_output: bool = True
-    
+
     def __post_init__(self):
         os.makedirs(self.file_path, exist_ok=True)
 
 
 class Settings:
     """Main application settings"""
-    
+
     def __init__(self):
         self.binance = BinanceConfig(
             api_key=os.getenv('BINANCE_API_KEY', ''),
             api_secret=os.getenv('BINANCE_API_SECRET', ''),
             testnet=os.getenv('BINANCE_TESTNET', 'false').lower() == 'true'
         )
-        
+
         self.database = DatabaseConfig(
             url=os.getenv('DATABASE_URL'),
             echo=os.getenv('DB_ECHO', 'false').lower() == 'true'
         )
-        
+
         self.telegram = TelegramConfig(
             token=os.getenv('TELEGRAM_TOKEN', ''),
             admin_ids=os.getenv('TELEGRAM_ADMIN_IDS', '').split(',')
         )
-        
+
         self.trading = TradingConfig()
         self.logging = LoggingConfig()
-        
+
         # Environment
         self.environment = os.getenv('ENVIRONMENT', 'development')
         self.debug = os.getenv('DEBUG', 'false').lower() == 'true'
-    
+
     def validate(self) -> bool:
         """Validate all configuration"""
         try:
             # Validate each config section
             if not self.binance.api_key:
                 raise ValueError("Binance API key missing")
-            
+
             if not self.telegram.token:
                 raise ValueError("Telegram token missing")
-            
+
             return True
-            
+
         except Exception as e:
             print(f"Configuration validation failed: {e}")
             return False
-    
+
     def is_production(self) -> bool:
         """Check if running in production"""
         return self.environment.lower() == 'production'
-    
+
     def get_log_level(self) -> str:
         """Get effective log level"""
         if self.debug:
@@ -160,7 +170,7 @@ settings = Settings()
 def get_binance_client():
     """Get configured Binance client"""
     from binance.client import Client
-    
+
     return Client(
         api_key=settings.binance.api_key,
         api_secret=settings.binance.api_secret,
