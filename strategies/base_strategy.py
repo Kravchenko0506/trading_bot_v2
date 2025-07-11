@@ -1,11 +1,11 @@
 # strategies/base_strategy.py
 """
 Base strategy engine with clean interface for trading decisions.
-Provides common functionality for all strategies.
+Provides common functionality for all strategies in the modular architecture.
 """
 from abc import ABC, abstractmethod
 from decimal import Decimal
-from typing import Dict, Any, List, Optional, NamedTuple
+from typing import Dict, Any, List, Optional, Protocol
 from dataclasses import dataclass
 from enum import Enum
 import numpy as np
@@ -13,6 +13,18 @@ import numpy as np
 from utils.logger import get_strategy_logger
 
 logger = get_strategy_logger()
+
+
+class IMarketDataService(Protocol):
+    """Protocol for market data service interface"""
+
+    async def get_current_price(self, symbol: str) -> Decimal:
+        """Get current market price for symbol"""
+        ...
+
+    async def get_price_history(self, symbol: str, limit: int) -> List[Decimal]:
+        """Get historical prices for symbol"""
+        ...
 
 
 class SignalType(Enum):
@@ -56,11 +68,12 @@ class StrategyConfig:
 class BaseStrategy(ABC):
     """
     Abstract base class for all trading strategies.
-    Provides clean interface and common functionality.
+    Provides clean interface and common functionality for modular architecture.
     """
 
-    def __init__(self, config: StrategyConfig):
+    def __init__(self, config: StrategyConfig, market_data_service: Optional[IMarketDataService] = None):
         self.config = config
+        self.market_data_service = market_data_service
         self.logger = logger
         self.name = self.__class__.__name__
 
@@ -94,6 +107,19 @@ class BaseStrategy(ABC):
 
         self.logger.debug(
             f"Price added: {price} (history length: {len(self.price_history)})")
+
+    def update_price_history(self, new_prices: List[Decimal]):
+        """Update price history with new data"""
+        if new_prices:
+            # Extend history with new prices
+            self.price_history.extend(new_prices)
+
+            # Keep only the last max_history_length prices
+            if len(self.price_history) > self.max_history_length:
+                self.price_history = self.price_history[-self.max_history_length:]
+
+            logger.debug(
+                f"Updated price history: {len(self.price_history)} candles")
 
     def has_sufficient_history(self) -> bool:
         """Check if we have enough price history for analysis"""
@@ -154,105 +180,56 @@ class BaseStrategy(ABC):
             self.logger.error(f"Config validation failed: {e}")
             return False
 
+    async def run(self):
+        """
+        Basic strategy run loop with market data integration.
+        Concrete strategies can override this for custom behavior.
+        """
+        logger.info(f"Starting {self.name} strategy for {self.config.symbol}")
 
-class SimpleMovingAverage:
-    """Helper class for SMA calculations"""
+        try:
+            # Get current market price if service is available
+            if self.market_data_service:
+                current_price = await self.market_data_service.get_current_price(self.config.symbol)
+                logger.info(f"Current market price: {current_price}")
+            else:
+                current_price = Decimal('100000')  # Fallback for testing
+                logger.warning("No market data service - using fallback price")
 
-    @staticmethod
-    def calculate(prices: np.ndarray, period: int) -> np.ndarray:
-        """Calculate Simple Moving Average"""
-        if len(prices) < period:
-            return np.array([])
+            # Ensure we have sufficient price history
+            if not self.has_sufficient_history() and self.market_data_service:
+                logger.info("Loading price history...")
+                history = await self.market_data_service.get_price_history(
+                    self.config.symbol,
+                    self.get_required_history()
+                )
+                self.update_price_history(history)
 
-        return np.convolve(prices, np.ones(period), 'valid') / period
+            # Run analysis
+            signal = await self.analyze(current_price)
 
+            logger.info(f"Strategy analysis result: {signal.signal.value} "
+                        f"(strength: {signal.strength.name}, confidence: {signal.confidence:.2f})")
+            logger.info(f"Reason: {signal.reason}")
 
-class RSI:
-    """Helper class for RSI calculations"""
+            return signal
 
-    @staticmethod
-    def calculate(prices: np.ndarray, period: int = 14) -> np.ndarray:
-        """Calculate Relative Strength Index"""
-        if len(prices) < period + 1:
-            return np.array([])
-
-        deltas = np.diff(prices)
-        gains = np.where(deltas > 0, deltas, 0)
-        losses = np.where(deltas < 0, -deltas, 0)
-
-        avg_gains = np.zeros_like(gains)
-        avg_losses = np.zeros_like(losses)
-
-        # Initial averages
-        avg_gains[period-1] = np.mean(gains[:period])
-        avg_losses[period-1] = np.mean(losses[:period])
-
-        # Smooth the averages
-        for i in range(period, len(gains)):
-            avg_gains[i] = (avg_gains[i-1] * (period-1) + gains[i]) / period
-            avg_losses[i] = (avg_losses[i-1] * (period-1) + losses[i]) / period
-
-        rs = avg_gains / (avg_losses + 1e-10)  # Avoid division by zero
-        rsi = 100 - (100 / (1 + rs))
-
-        return rsi[period-1:]
+        except Exception as e:
+            logger.error(f"Error in strategy run: {e}")
+            raise
 
 
-class MACD:
-    """Helper class for MACD calculations"""
-
-    @staticmethod
-    def calculate(
-        prices: np.ndarray,
-        fast_period: int = 12,
-        slow_period: int = 26,
-        signal_period: int = 9
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Calculate MACD line, signal line, and histogram"""
-        if len(prices) < slow_period:
-            return np.array([]), np.array([]), np.array([])
-
-        # Calculate EMAs
-        ema_fast = MACD._ema(prices, fast_period)
-        ema_slow = MACD._ema(prices, slow_period)
-
-        # MACD line
-        macd_line = ema_fast - ema_slow
-
-        # Signal line (EMA of MACD)
-        signal_line = MACD._ema(macd_line, signal_period)
-
-        # Histogram
-        histogram = macd_line - signal_line
-
-        return macd_line, signal_line, histogram
-
-    @staticmethod
-    def _ema(prices: np.ndarray, period: int) -> np.ndarray:
-        """Calculate Exponential Moving Average"""
-        if len(prices) < period:
-            return np.array([])
-
-        alpha = 2.0 / (period + 1)
-        ema = np.zeros_like(prices)
-        ema[0] = prices[0]
-
-        for i in range(1, len(prices)):
-            ema[i] = alpha * prices[i] + (1 - alpha) * ema[i-1]
-
-        return ema
-
-
-# Strategy factory function
+# Strategy factory function (DEPRECATED - use StrategyFactory instead)
 def create_strategy(strategy_name: str, config: StrategyConfig) -> BaseStrategy:
-    """Factory function to create strategy instances"""
+    """
+    Factory function to create strategy instances.
+    DEPRECATED: Use strategies.strategy_factory.StrategyFactory for modular indicator-based strategies.
+    """
+    logger.warning(
+        "create_strategy is deprecated. Use StrategyFactory for modular strategies.")
 
     # Import strategies here to avoid circular imports
-    if strategy_name.lower() == "rsi_macd":
-        from strategies.rsi_macd import RSIMacdStrategy
-        return RSIMacdStrategy(config)
-
-    elif strategy_name.lower() == "grid":
+    if strategy_name.lower() == "grid":
         from strategies.grid_strategy import GridStrategy
         return GridStrategy(config)
 
@@ -261,4 +238,5 @@ def create_strategy(strategy_name: str, config: StrategyConfig) -> BaseStrategy:
         return DCAStrategy(config)
 
     else:
-        raise ValueError(f"Unknown strategy: {strategy_name}")
+        raise ValueError(
+            f"Unknown strategy: {strategy_name}. Use StrategyFactory for modular strategies.")

@@ -115,27 +115,52 @@ def setup_signal_handlers():
 
 
 async def run_strategy(strategy_name: str):
-    """Run specific trading strategy"""
+    """Run specific trading strategy using modular architecture"""
     try:
         logger.info(f"Running strategy: {strategy_name}")
 
-        # Import strategy module dynamically
+        # Create market data service instance
+        market_data_service = trading_engine.market_data
+
+        # Use new modular indicator system
         if strategy_name == "rsi_macd":
-            from strategies.rsi_macd import RSIMACDStrategy
-            strategy = RSIMACDStrategy(trading_engine)
+            from strategies.strategy_factory import StrategyFactory
+            strategy = StrategyFactory.create_rsi_macd_strategy(
+                market_data_service)
+        elif strategy_name == "simple_rsi":
+            from strategies.strategy_factory import StrategyFactory
+            strategy = StrategyFactory.create_simple_rsi_strategy(
+                market_data_service)
+        elif strategy_name == "bollinger_rsi":
+            from strategies.strategy_factory import StrategyFactory
+            strategy = StrategyFactory.create_bollinger_rsi_strategy(
+                market_data_service)
+        elif strategy_name == "sma_crossover":
+            from strategies.strategy_factory import StrategyFactory
+            strategy = StrategyFactory.create_sma_crossover_strategy(
+                market_data_service)
+        elif strategy_name == "custom":
+            # Load custom strategy from config
+            from strategies.strategy_config import StrategyConfigs
+            from strategies.strategy_factory import StrategyFactory
+            config = StrategyConfigs.get_rsi_macd_ema_config()
+            strategy = StrategyFactory.create_custom_strategy(
+                config, market_data_service)
         elif strategy_name == "grid":
-            from strategies.grid_strategy import GridStrategy
-            strategy = GridStrategy(trading_engine)
+            from strategies.grid_strategy import GridTradingStrategy, GridConfig
+            config = GridConfig(symbol="BTCUSDT", timeframe="1h")
+            strategy = GridTradingStrategy(config, market_data_service)
         elif strategy_name == "dca":
-            from strategies.dca_strategy import DCAStrategy
-            strategy = DCAStrategy(trading_engine)
-        elif strategy_name == "scalping":
-            # Scalping strategy removed - use DCA as default
-            logger.warning(f"Scalping strategy deprecated, using DCA instead")
-            from strategies.dca_strategy import DCAStrategy
-            strategy = DCAStrategy(trading_engine)
+            from strategies.dca_strategy import DCAStrategy, DCAConfig
+            config = DCAConfig(symbol="BTCUSDT", timeframe="1h")
+            strategy = DCAStrategy(config, market_data_service)
         else:
-            raise ValueError(f"Unknown strategy: {strategy_name}")
+            logger.warning(
+                f"Unknown strategy: {strategy_name}. Available: rsi_macd, simple_rsi, bollinger_rsi, sma_crossover, custom, grid, dca")
+            # Default to RSI+MACD strategy
+            from strategies.strategy_factory import StrategyFactory
+            strategy = StrategyFactory.create_rsi_macd_strategy(
+                market_data_service)
 
         # Run strategy
         await strategy.run()
