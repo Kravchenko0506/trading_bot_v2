@@ -98,14 +98,17 @@ class TradingBotFactory:
 
         logger.debug("Settings validation passed")
 
-    def _create_binance_client(self, settings: Settings):
-        """Create and configure Binance client - УПРОЩЕННАЯ ВЕРСИЯ"""
+    def _create_binance_client(self, settings: Settings) -> BinanceClient:
+        """Create and configure Binance client"""
         logger.debug("Creating Binance client")
 
         if self._binance_client is None:
-            # Используем твой существующий BinanceClient вместо SecureBinanceClient
-            from utils.binance_client import create_binance_client
-            self._binance_client = create_binance_client()
+            self._binance_client = BinanceClient(
+                api_key=settings.binance.api_key,
+                api_secret=settings.binance.api_secret,
+                testnet=settings.binance.testnet,
+                rate_limit_per_minute=settings.binance.rate_limit_per_minute
+            )
             logger.info(
                 f"Binance client created (testnet: {settings.binance.testnet})")
 

@@ -174,3 +174,9 @@ class OrderService(IOrderService):
         except Exception as e:
             logger.error(f"Market sell execution failed: {e}")
             raise ExchangeConnectionError(f"Market sell failed: {str(e)}")
+
+    async def close(self):
+        """Close client connections"""
+        if hasattr(self.client, 'close'):
+            await self.client.close()
+            logger.info("OrderService connections closed")

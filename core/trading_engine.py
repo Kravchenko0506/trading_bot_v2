@@ -207,5 +207,7 @@ class TradingEngine:
     async def stop(self):
         """Stop trading engine gracefully"""
         logger.info("Trading engine stopping...")
-        # Cleanup operations would go here
+        # Close service connections
+        if hasattr(self.order_service, 'close'):
+            await self.order_service.close()
         logger.info("Trading engine stopped")
